@@ -22,18 +22,23 @@ import type { TableColumnProps } from '@arco-design/web-react'
 import EmptyPanel from '@/components/common/EmptyPanel'
 import FilterBar, { type FilterModel } from '@/components/common/FilterBar'
 import StatBadge from '@/components/common/StatBadge'
+import { ReplacementWizard } from '@/components/replacement/ReplacementWizard'
+import { ReplacementHistory } from '@/components/replacement/ReplacementHistory'
 import { useStationStore } from '@/stores/stationStore'
 import { usePatrolStore } from '@/stores/patrolStore'
 import { useLeakStore } from '@/stores/leakStore'
+import { useReplacementStore } from '@/stores/replacementStore'
 import {
   DEVICE_STATES,
   DEVICE_TYPES,
   EMPTY_DEVICE_DRAFT,
+  isRetiredDevice,
   type Device,
   type DeviceDraft,
   type DeviceState,
   type DeviceType
 } from '@/types/device'
+import { isOpenLeak } from '@/types/leak'
 import {
   EMPTY_STATION_DRAFT,
   STATION_GRADES,
@@ -49,11 +54,15 @@ export default function StationList() {
   const stationStore = useStationStore()
   const patrolStore = usePatrolStore()
   const leakStore = useLeakStore()
+  const replacementStore = useReplacementStore()
 
   const [stationForm] = Form.useForm<StationDraft>()
   const [deviceForm] = Form.useForm<DeviceDraft>()
   const [stationOpen, setStationOpen] = useState(false)
   const [deviceOpen, setDeviceOpen] = useState(false)
+  const [replacementOpen, setReplacementOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [replacementSource, setReplacementSource] = useState<Device | null>(null)
   const [editingStationId, setEditingStationId] = useState<string | null>(null)
   const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null)
 
@@ -81,10 +90,19 @@ export default function StationList() {
   }
 
   const openLeakOf = (stationId: string): number =>
-    leakStore.leaks.filter((leak) => leak.stationId === stationId && leak.state !== '已复检').length
+    leakStore.leaks.filter((leak) => leak.stationId === stationId && isOpenLeak(leak)).length
 
   const missedOf = (stationId: string): number =>
     patrolStore.patrols.filter((patrol) => patrol.stationId === stationId && patrol.state === '漏检').length
+
+  const openReplacement = (device: Device | null): void => {
+    if (!currentStation) {
+      Message.warning('请先选择或新建一个调压站')
+      return
+    }
+    setReplacementSource(device)
+    setReplacementOpen(true)
+  }
 
   const openCreateStation = (): void => {
     setEditingStationId(null)
@@ -165,32 +183,70 @@ export default function StationList() {
   }
 
   const deviceColumns: TableColumnProps<Device>[] = [
-    { title: '设备类型', dataIndex: 'type', width: 110, render: (value: DeviceType) => <Tag color="arcoblue">{value}</Tag> },
-    { title: '型号', dataIndex: 'model', width: 150 },
-    { title: '出厂编号', dataIndex: 'serialNo', width: 170 },
-    { title: '投用日期', dataIndex: 'installDate', width: 120 },
+    { title: '设备类型', dataIndex: 'type', width: 100, render: (value: DeviceType) => <Tag color="arcoblue">{value}</Tag> },
+    { title: '型号', dataIndex: 'model', width: 140 },
+    { title: '出厂编号', dataIndex: 'serialNo', width: 160 },
+    { title: '投用日期', dataIndex: 'installDate', width: 110 },
     {
       title: '状态',
       dataIndex: 'state',
-      width: 100,
-      render: (value: DeviceState) => (
-        <Tag color={value === '运行' ? 'green' : value === '检修' ? 'orange' : 'gray'}>{value}</Tag>
-      )
+      width: 130,
+      render: (value: DeviceState, record) =>
+        isRetiredDevice(record) ? (
+          <Space size={4}>
+            <Tag color="gray">已退役</Tag>
+            <Tag size="small">{value}</Tag>
+          </Space>
+        ) : (
+          <Tag color={value === '运行' ? 'green' : value === '检修' ? 'orange' : 'gray'}>{value}</Tag>
+        )
     },
     {
-      title: '点位数',
+      title: '当前点位',
       width: 90,
-      render: (_value, record) => stationStore.pointsOfDevice(record.id).length
+      render: (_value, record) => (isRetiredDevice(record) ? 0 : stationStore.activePointsOfDevice(record.id).length)
+    },
+    {
+      title: '更换关系',
+      width: 150,
+      render: (_value, record) => {
+        if (isRetiredDevice(record) && record.replacedBy) {
+          const next = stationStore.devices.find((device) => device.id === record.replacedBy)
+          return <Tag color="gray">已由{next ? ` ${next.model}` : '新设备'}接替</Tag>
+        }
+        const replaced = replacementStore.byNewDevice(record.id)
+        if (replaced) {
+          const old = stationStore.devices.find((device) => device.id === replaced.oldDeviceId)
+          return <Tag color="cyan">{old ? `接替 ${old.model}` : '整机更换新设备'}</Tag>
+        }
+        return <span className="muted">—</span>
+      }
     },
     {
       title: '操作',
-      width: 230,
+      width: 260,
       render: (_value, record) => (
-        <Space size={4}>
-          <Button type="text" size="small" onClick={() => openEditDevice(record)}>
+        <Space size={4} wrap>
+          <Button type="text" size="small" disabled={isRetiredDevice(record)} onClick={() => openEditDevice(record)}>
             编辑
           </Button>
-          <Popconfirm title="删除该设备将级联删除其点位与泄漏处置单" onOk={() => removeDevice(record)}>
+          <Button
+            type="text"
+            size="small"
+            disabled={isRetiredDevice(record)}
+            status={isRetiredDevice(record) ? undefined : 'warning'}
+            onClick={() => openReplacement(record)}
+          >
+            整机更换
+          </Button>
+          <Popconfirm
+            title={
+              isRetiredDevice(record)
+                ? '退役设备删除后其历史读数将一并删除，建议保留档案。确认删除？'
+                : '删除该设备将级联删除其点位与泄漏处置单；整机更换请用「整机更换」'
+            }
+            onOk={() => removeDevice(record)}
+          >
             <Button type="text" size="small" status="danger">
               删除
             </Button>
@@ -203,7 +259,7 @@ export default function StationList() {
               navigate('/points')
             }}
           >
-            点位配置
+            点位
           </Button>
         </Space>
       )
@@ -224,13 +280,19 @@ export default function StationList() {
           <Button disabled={!currentStation} onClick={openCreateDevice}>
             登记设备
           </Button>
+          <Button disabled={!currentStation} onClick={() => openReplacement(null)}>
+            整机更换
+          </Button>
+          <Button disabled={!currentStation} onClick={() => setHistoryOpen(true)}>
+            更换记录
+          </Button>
         </div>
       </div>
 
       <div className="stat-row">
         <StatBadge label="调压站" value={stationStore.stations.length} suffix="座" tone="primary" />
         <StatBadge label="设备" value={stationStore.devices.length} suffix="台" tone="info" />
-        <StatBadge label="巡检点位" value={stationStore.pointStats().total} suffix="个" tone="default" />
+        <StatBadge label="当前巡检点位" value={stationStore.pointStats().activeTotal} suffix="个" tone="default" />
         <StatBadge label="待处置泄漏" value={leakStore.counts()['待处置']} suffix="单" tone="danger" />
       </div>
 
@@ -265,7 +327,7 @@ export default function StationList() {
                 </div>
                 <div className="card-list-item__meta">
                   <span>设备 {stationStore.devicesOfStation(station.id).length}</span>
-                  <span>· 点位 {stationStore.points.filter((point) => point.stationId === station.id).length}</span>
+                  <span>· 当前点位 {stationStore.activePointsOfStation(station.id).length}</span>
                   <span style={{ color: openLeakOf(station.id) > 0 ? '#f53f3f' : undefined }}>
                     · 待处置泄漏 {openLeakOf(station.id)}
                   </span>
@@ -298,7 +360,10 @@ export default function StationList() {
             <h3 className="panel-title" style={{ margin: 0 }}>
               设备明细{currentStation ? ` · ${currentStation.name}` : ''}
             </h3>
-            <span className="muted">共 {devices.length} 台设备</span>
+            <span className="muted">
+              共 {devices.length} 台设备（在役 {devices.filter((device) => !isRetiredDevice(device)).length} · 退役{' '}
+              {devices.filter((device) => isRetiredDevice(device)).length}）
+            </span>
           </div>
           {devices.length === 0 ? (
             <EmptyPanel
@@ -375,6 +440,13 @@ export default function StationList() {
           </Form.Item>
         </Form>
       </Modal>
+
+      <ReplacementWizard
+        visible={replacementOpen}
+        sourceDevice={replacementSource}
+        onClose={() => setReplacementOpen(false)}
+      />
+      <ReplacementHistory visible={historyOpen} onClose={() => setHistoryOpen(false)} />
     </div>
   )
 }

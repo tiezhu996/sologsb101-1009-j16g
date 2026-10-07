@@ -53,13 +53,14 @@ sologsb101-1009/
     ├── package.json / tsconfig.json / vite.config.ts / index.html
     ├── public/favicon.svg
     └── src/
-        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts
-        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts
+        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts replacement.ts
+        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts replacementStore.ts
         ├── components/common/  # AbnormalTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx
+        ├── components/replacement/  # ReplacementWizard.tsx ReplacementHistory.tsx
         ├── hooks/              # usePatrolGap.ts useIdbTable.ts
         ├── pages/              # StationList.tsx PointConfig.tsx PatrolEntry.tsx AbnormalBoard.tsx LeakBoard.tsx PlanList.tsx
         ├── router/index.tsx
-        ├── utils/              # range.ts db.ts export.ts
+        ├── utils/              # range.ts db.ts export.ts replacementRunner.ts
         ├── styles/main.css
         ├── App.tsx
         └── main.tsx
@@ -79,8 +80,10 @@ sologsb101-1009/
 ## 五、数据存储说明
 
 - **IndexedDB 库名**：`gbgaspress`（Dexie 封装，`src/utils/db.ts`）
-- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的索引变更与 `upgrade()` 迁移（补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`）
+- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`、`replacements`
+- **数据结构版本**：`DB_VERSION = 3`，含 `version(1)` → `version(2)` → `version(3)` 的索引变更与 `upgrade()` 迁移
+  - v1→v2：补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`
+  - v2→v3：年度检修**整机更换**。新增 `replacements` 更换台账；`devices` 补 `retiredAt` / `replacedBy` / `replacementId`，`points` 补 `retiredAt` / `sourcePointId` / `sourceDeviceId` / `replacementId`，`leaks` 补 `archived` / `archivedAt` / `archiveNote`。升级只补缺省结构，**不凭旧数据反推更换关系**——缺少更换记录的旧数据一律按原设备账继续（设备仍运行、点位仍为当前点位），避免无中生有产生两套当前点位
 - **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座调压站 → 5 台设备 → 11 个点位 → 6 次巡检 → 11 条读数 → 3 张泄漏处置单的完整父子孙链条；播种幂等
 - **localStorage 辅助键**：`gbgaspress:db-version`、`gbgaspress:last-backup-at`、`gbgaspress:ui-prefs`
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷
@@ -102,3 +105,14 @@ npm run preview    # 本地预览构建产物
 - 排序权重：严重超标（关键点 50 / 普通点 30）> 轻微超标（关键点 30 / 普通点 20）> 正常（0）
 - 泄漏复检合格阈值：`≤ 50 ppm`
 - 漏检判定：计划日期早于今天且实际日期为空
+
+## 八、年度检修设备整机更换口径
+
+年度检修整机更换在「调压站台账 → 设备明细 → 整机更换」发起，禁止直接改设备编号或删旧设备（否则历史读数、点位、泄漏单会错挂）。更换按**有序阶段步骤**推进（登记 → 停机 → 复制点位 → 旧设备退役 → 投运），每步独立事务、幂等可重入：
+
+- **登记旧设备 / 新设备 / 停机时间 / 投运时间**：建一笔 `replacements` 台账；新设备先以「检修」态入库，旧设备保持运行。
+- **停机后旧设备保留历史**：旧设备置「停用」并记 `retiredAt`，其历史读数、旧点位、泄漏处置单一律不迁移、不改挂。
+- **未完成巡检点位复制到新设备**：仅复制停机时旧设备的**当前有效点位**（标准值/单位/关键点一并复制），新点位写 `sourcePointId` / `sourceDeviceId` 标明来源；源点位随即退役。最终全站只有一套当前点位。
+- **泄漏单按旧设备留在原处**：未闭环泄漏单不迁到新设备（避免新设备无端背上旧故障），在「泄漏处置」页对旧设备遗留单**人工归档**；归档后不计入待处置口径但记录仍挂旧设备。
+- **写入失败恢复接着上次进度**：`pendingStep` 记录下一步，应用启动时自动续跑中断在迁移链路的记录；已复制点位按 `copiedPointIds` 去重，绝不重复复制。「已登记待停机」「已停机待投运」是等人工的正常停顿，不自动推进。
+- **旧数据升级缺少更换记录就按原设备账继续**：v3 迁移不反推更换关系，无更换记录的设备仍为在役、点位仍为当前点位。

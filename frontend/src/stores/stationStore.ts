@@ -20,7 +20,7 @@ import {
 } from '@/utils/db'
 import type { Device, DeviceDraft, DeviceState, DeviceType } from '@/types/device'
 import type { Point, PointDraft, PointFilterState, PointTemplate, StandardDraft } from '@/types/point'
-import { createEmptyPointFilter } from '@/types/point'
+import { createEmptyPointFilter, isActivePoint } from '@/types/point'
 import type { Station, StationDraft, StationGrade } from '@/types/station'
 
 export interface StationFilterState {
@@ -64,9 +64,12 @@ interface StationState {
   commitAllStandardDrafts: () => Promise<number>
   devicesOfStation: (stationId: string) => Device[]
   pointsOfDevice: (deviceId: string) => Point[]
+  /** 当前有效（未随旧设备退役）点位：整机更换后只返回新设备的一套当前点位 */
+  activePointsOfDevice: (deviceId: string) => Point[]
+  activePointsOfStation: (stationId: string) => Point[]
   currentStation: () => Station | null
   filteredStations: () => Station[]
-  pointStats: () => { total: number; critical: number }
+  pointStats: () => { total: number; critical: number; activeTotal: number }
 }
 
 export const useStationStore = create<StationState>((set, get) => ({
@@ -281,6 +284,14 @@ export const useStationStore = create<StationState>((set, get) => ({
     return get().points.filter((point) => point.deviceId === deviceId)
   },
 
+  activePointsOfDevice(deviceId) {
+    return get().points.filter((point) => point.deviceId === deviceId && isActivePoint(point))
+  },
+
+  activePointsOfStation(stationId) {
+    return get().points.filter((point) => point.stationId === stationId && isActivePoint(point))
+  },
+
   currentStation() {
     return get().stations.find((station) => station.id === get().currentStationId) ?? null
   },
@@ -303,7 +314,11 @@ export const useStationStore = create<StationState>((set, get) => ({
 
   pointStats() {
     const points = get().points
-    return { total: points.length, critical: points.filter((point) => point.isCritical).length }
+    return {
+      total: points.length,
+      critical: points.filter((point) => point.isCritical).length,
+      activeTotal: points.filter((point) => isActivePoint(point)).length
+    }
   }
 }))
 

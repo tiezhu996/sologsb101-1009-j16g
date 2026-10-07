@@ -26,6 +26,7 @@ import { usePatrolStore } from '@/stores/patrolStore'
 import { usePatrolGap } from '@/hooks/usePatrolGap'
 import { PATROL_STATES, type Patrol, type PatrolState } from '@/types/patrol'
 import type { Point } from '@/types/point'
+import { isActivePoint } from '@/types/point'
 import type { Reading } from '@/types/reading'
 
 export default function PatrolEntry() {
@@ -68,13 +69,15 @@ export default function PatrolEntry() {
     ? patrolStore.patrols.find((patrol) => patrol.id === patrolStore.activePatrolId) ?? null
     : null
 
-  /** 当前站点下所有设备点位 */
+  /** 当前站点下所有设备的当前有效点位（旧设备退役点位不再录入，避免两套当前点位） */
   const activePoints = useMemo<Point[]>(() => {
     if (!activePatrol) return []
     const deviceIds = stationStore.devices
       .filter((device) => device.stationId === activePatrol.stationId)
       .map((device) => device.id)
-    return stationStore.points.filter((point) => deviceIds.includes(point.deviceId))
+    return stationStore.points.filter(
+      (point) => deviceIds.includes(point.deviceId) && isActivePoint(point)
+    )
   }, [activePatrol, stationStore.devices, stationStore.points])
 
   const activeReadings = activePatrol ? patrolStore.readingsOfPatrol(activePatrol.id) : []

@@ -21,7 +21,7 @@ export default function App() {
 
   const navItems = [
     { path: ROUTES.stations, label: '调压站台账', count: stationStore.stations.length },
-    { path: ROUTES.points, label: '点位配置', count: stationStore.points.length },
+    { path: ROUTES.points, label: '点位配置', count: stationStore.pointStats().activeTotal },
     { path: ROUTES.patrols, label: '巡检录入', count: patrolStore.patrols.length },
     { path: ROUTES.abnormal, label: '异常分级', count: patrolStore.abnormalRows().length },
     { path: ROUTES.leaks, label: '泄漏处置', count: leakStore.counts()['待处置'] },
@@ -94,7 +94,8 @@ export default function App() {
       <footer className="app-footer">
         <span>数据仅保存于本机浏览器（IndexedDB / localStorage），不上传任何服务器。</span>
         <span>
-          调压站 {stationStore.stations.length} 座 · 设备 {stationStore.devices.length} 台 · 点位 {stationStore.points.length} 个 ·
+          调压站 {stationStore.stations.length} 座 · 设备 {stationStore.devices.length} 台 · 当前点位{' '}
+          {stationStore.pointStats().activeTotal} 个 ·
           巡检 {patrolStore.patrols.length} 次 · 读数 {patrolStore.readings.length} 条 · 超期未检 {gap.overdueCount} 次
         </span>
       </footer>

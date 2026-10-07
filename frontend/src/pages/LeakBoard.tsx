@@ -5,6 +5,7 @@
  */
 import { useMemo, useState } from 'react'
 import {
+  Alert,
   Button,
   Form,
   Input,
@@ -23,11 +24,13 @@ import FilterBar, { type FilterModel } from '@/components/common/FilterBar'
 import StatBadge from '@/components/common/StatBadge'
 import { useStationStore } from '@/stores/stationStore'
 import { useLeakStore } from '@/stores/leakStore'
+import { isRetiredDevice } from '@/types/device'
 import {
   EMPTY_LEAK_DRAFT,
   LEAK_RETEST_PASS_PPM,
   LEAK_STATES,
   LEAK_STATE_FLOW,
+  isLegacyOpenLeak,
   retestPassed,
   type Leak,
   type LeakDraft,
@@ -42,9 +45,11 @@ export default function LeakBoard() {
   const [form] = Form.useForm<LeakDraft>()
   const [treatForm] = Form.useForm<{ handler: string; measure: string }>()
   const [retestForm] = Form.useForm<{ retestValuePpm: number; handler: string }>()
+  const [archiveForm] = Form.useForm<{ archiveNote: string }>()
   const [formOpen, setFormOpen] = useState(false)
   const [treatOpen, setTreatOpen] = useState(false)
   const [retestOpen, setRetestOpen] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [target, setTarget] = useState<Leak | null>(null)
   const [keyword, setKeyword] = useState('')
@@ -87,10 +92,13 @@ export default function LeakBoard() {
     )
   })
 
-  const deviceOptions = stationStore.devices.map((device) => {
-    const station = stationStore.stations.find((item) => item.id === device.stationId)
-    return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
-  })
+  // 新建处置单只允许选择在役设备；旧设备遗留单走人工归档，不在新/旧设备上重复挂账
+  const deviceOptions = stationStore.devices
+    .filter((device) => !isRetiredDevice(device))
+    .map((device) => {
+      const station = stationStore.stations.find((item) => item.id === device.stationId)
+      return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
+    })
 
   const openCreate = (): void => {
     if (deviceOptions.length === 0) {
@@ -132,6 +140,24 @@ export default function LeakBoard() {
   const remove = async (leak: Leak): Promise<void> => {
     await leakStore.removeLeak(leak.id)
     Message.success('处置单已删除')
+  }
+
+  const openArchive = (leak: Leak): void => {
+    setTarget(leak)
+    archiveForm.setFieldsValue({
+      archiveNote:
+        leak.archiveNote || '该设备已年度整机更换，旧故障随旧设备人工归档，不迁移到新设备'
+    })
+    setArchiveOpen(true)
+  }
+
+  const submitArchive = async (): Promise<void> => {
+    if (!target) return
+    const values = await archiveForm.validate().catch(() => null)
+    if (!values) return
+    await leakStore.archiveLeak(target.id, values.archiveNote)
+    Message.success('泄漏单已按旧设备人工归档，不计入新设备待处置口径')
+    setArchiveOpen(false)
   }
 
   const advance = async (leak: Leak): Promise<void> => {
@@ -176,11 +202,18 @@ export default function LeakBoard() {
   const columns: TableColumnProps<Leak>[] = [
     {
       title: '调压站 / 设备',
-      width: 240,
+      width: 260,
       render: (_value, record) => {
         const station = stationStore.stations.find((item) => item.id === record.stationId)
         const device = stationStore.devices.find((item) => item.id === record.deviceId)
-        return `${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`
+        const legacy = isLegacyOpenLeak(record, device)
+        return (
+          <Space size={4} wrap>
+            <span>{`${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`}</span>
+            {device && isRetiredDevice(device) ? <Tag color="gray" size="small">旧设备</Tag> : null}
+            {legacy ? <Tag color="red" size="small">待人工归档</Tag> : null}
+          </Space>
+        )
       }
     },
     {
@@ -199,9 +232,12 @@ export default function LeakBoard() {
     { title: '处置措施', dataIndex: 'measure', width: 240, render: (value: string) => value || '—' },
     {
       title: '状态',
-      width: 110,
+      width: 130,
       render: (_value, record) => (
-        <Tag color={record.state === '已复检' ? 'green' : record.state === '已处置' ? 'blue' : 'red'}>{record.state}</Tag>
+        <Space size={4}>
+          <Tag color={record.state === '已复检' ? 'green' : record.state === '已处置' ? 'blue' : 'red'}>{record.state}</Tag>
+          {record.archived ? <Tag color="gray" size="small">已归档</Tag> : null}
+        </Space>
       )
     },
     {
@@ -222,12 +258,24 @@ export default function LeakBoard() {
     { title: '处置人', dataIndex: 'handler', width: 100, render: (value: string) => value || '—' },
     {
       title: '操作',
-      width: 240,
+      width: 320,
       render: (_value, record) => (
-        <Space size={4}>
+        <Space size={4} wrap>
           <Button type="text" size="small" disabled={!LEAK_STATE_FLOW[record.state]} onClick={() => advance(record)}>
             {LEAK_STATE_FLOW[record.state] === '已处置' ? '填写措施' : LEAK_STATE_FLOW[record.state] === '已复检' ? '录入复检' : '已闭环'}
           </Button>
+          {record.archived ? (
+            <Button type="text" size="small" onClick={async () => {
+              await leakStore.unarchiveLeak(record.id)
+              Message.success('已取消归档，泄漏单重新计入待跟踪口径')
+            }}>
+              取消归档
+            </Button>
+          ) : (
+            <Button type="text" size="small" status="warning" onClick={() => openArchive(record)}>
+              人工归档
+            </Button>
+          )}
           <Button type="text" size="small" onClick={() => openEdit(record)}>
             编辑
           </Button>
@@ -259,6 +307,9 @@ export default function LeakBoard() {
             }}
           >
             {leakStore.onlyOpen ? '查看全部' : '仅看未闭环'}
+          </Button>
+          <Button onClick={() => leakStore.patchFilter({ includeArchived: !leakStore.includeArchived })}>
+            {leakStore.includeArchived ? '隐藏已归档' : '含已归档遗留单'}
           </Button>
           <Button type="primary" onClick={openCreate}>
             新建处置单
@@ -300,7 +351,7 @@ export default function LeakBoard() {
             data={rows}
             columns={columns}
             pagination={false}
-            scroll={{ x: 1500 }}
+            scroll={{ x: 1600 }}
           />
         )}
       </div>
@@ -377,6 +428,27 @@ export default function LeakBoard() {
           </Form.Item>
           <Form.Item field="handler" label="复检人" rules={[{ required: true, message: '请填写复检人' }]}>
             <Input placeholder="如 李娜" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        visible={archiveOpen}
+        title="旧设备遗留泄漏单 · 人工归档"
+        onCancel={() => setArchiveOpen(false)}
+        onOk={submitArchive}
+        okText="确认归档到旧设备"
+        cancelText="取消"
+        unmountOnExit
+      >
+        <Alert
+          type="warning"
+          style={{ marginBottom: 12 }}
+          content="该泄漏单属于已整机更换的旧设备，将留在旧设备账上归档，不会迁到新设备；归档后不再计入待处置口径。"
+        />
+        <Form form={archiveForm} layout="vertical">
+          <Form.Item field="archiveNote" label="归档说明">
+            <Input.TextArea autoSize={{ minRows: 3, maxRows: 5 }} placeholder="如 设备已整机更换，旧故障随旧设备人工归档" />
           </Form.Item>
         </Form>
       </Modal>

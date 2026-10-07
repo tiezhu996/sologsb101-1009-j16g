@@ -31,11 +31,12 @@ import {
   EMPTY_POINT_DRAFT,
   POINT_TEMPLATES,
   POINT_UNITS,
+  isActivePoint,
   type Point,
   type PointDraft,
   type PointTemplate
 } from '@/types/point'
-import { DEVICE_TYPES } from '@/types/device'
+import { DEVICE_TYPES, isRetiredDevice } from '@/types/device'
 import { abnormalLevelOf, deviationPctOf, rangeText } from '@/utils/range'
 
 export default function PointConfig() {
@@ -78,6 +79,7 @@ export default function PointConfig() {
   }
 
   const rows = stationStore.points.filter((point) => {
+    if (!filter.includeRetired && !isActivePoint(point)) return false
     if (filter.stationId && point.stationId !== filter.stationId) return false
     if (filter.onlyCritical && !point.isCritical) return false
     if (filter.deviceTypes.length > 0) {
@@ -95,6 +97,7 @@ export default function PointConfig() {
 
   const deviceOptions = stationStore.devices
     .filter((device) => !filter.stationId || device.stationId === filter.stationId)
+    .filter((device) => !isRetiredDevice(device))
     .map((device) => {
       const station = stationStore.stations.find((item) => item.id === device.stationId)
       return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
@@ -179,7 +182,31 @@ export default function PointConfig() {
   }
 
   const columns: TableColumnProps<Point>[] = [
-    { title: '点位名', dataIndex: 'name', width: 140, render: (value: string) => <strong>{value}</strong> },
+    {
+      title: '点位名',
+      dataIndex: 'name',
+      width: 150,
+      render: (value: string, record) => (
+        <Space size={4}>
+          <strong>{value}</strong>
+          {record.sourcePointId ? <Tag color="cyan" size="small">更换继承</Tag> : null}
+          {!isActivePoint(record) ? <Tag color="gray" size="small">已退役</Tag> : null}
+        </Space>
+      )
+    },
+    {
+      title: '来源',
+      width: 180,
+      render: (_value, record) => {
+        if (!record.sourcePointId) return <span className="muted">原设点位</span>
+        const sourceDevice = stationStore.devices.find((device) => device.id === record.sourceDeviceId)
+        return (
+          <span className="muted">
+            来自 {sourceDevice ? `${sourceDevice.type} ${sourceDevice.model}` : '旧设备'} 的同名点位
+          </span>
+        )
+      }
+    },
     {
       title: '调压站 / 设备',
       width: 220,
@@ -285,7 +312,7 @@ export default function PointConfig() {
       width: 140,
       render: (_value, record) => (
         <Space size={4}>
-          <Button type="text" size="small" onClick={() => openEdit(record)}>
+          <Button type="text" size="small" disabled={!isActivePoint(record)} onClick={() => openEdit(record)}>
             编辑
           </Button>
           <Popconfirm title="删除该点位将同时删除其巡检读数" onOk={() => remove(record)}>
@@ -310,6 +337,14 @@ export default function PointConfig() {
           </p>
         </div>
         <div className="page-head__actions">
+          <Space size={8}>
+            <span className="muted" style={{ fontSize: 13 }}>含退役历史点位</span>
+            <Switch
+              size="small"
+              checked={filter.includeRetired}
+              onChange={(checked: boolean) => stationStore.patchPointFilter({ includeRetired: checked })}
+            />
+          </Space>
           <Button onClick={openTemplate}>按模板批量复制</Button>
           <Button disabled={Object.keys(stationStore.standardDraft).length === 0} onClick={commitAll}>
             提交标准值草稿（{Object.keys(stationStore.standardDraft).length}）
@@ -321,9 +356,9 @@ export default function PointConfig() {
       </div>
 
       <div className="stat-row">
-        <StatBadge label="点位总数" value={stats.total} suffix="个" tone="primary" />
-        <StatBadge label="关键点" value={stats.critical} suffix="个" tone="warning" />
-        <StatBadge label="设备数" value={stationStore.devices.length} suffix="台" tone="info" />
+        <StatBadge label="当前点位" value={stats.activeTotal} suffix="个" tone="primary" />
+        <StatBadge label="关键点" value={stationStore.points.filter((p) => p.isCritical && isActivePoint(p)).length} suffix="个" tone="warning" />
+        <StatBadge label="退役历史点位" value={stats.total - stats.activeTotal} suffix="个" tone="default" />
         <StatBadge
           label="异常读数占比"
           value={readingTable.rows.filter((row) => row.isAbnormal).length}

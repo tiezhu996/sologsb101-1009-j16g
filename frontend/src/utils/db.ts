@@ -10,10 +10,11 @@ import type { Point } from '@/types/point'
 import type { Patrol } from '@/types/patrol'
 import type { Reading } from '@/types/reading'
 import type { Leak } from '@/types/leak'
+import type { Replacement } from '@/types/replacement'
 import { deviationPctOf, judgeReading } from '@/utils/range'
 
 export const DB_NAME = 'gbgaspress'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export const LS_KEYS = {
   dbVersion: 'gbgaspress:db-version',
@@ -38,13 +39,14 @@ export interface BackupPayload {
   patrols: Patrol[]
   readings: Reading[]
   leaks: Leak[]
+  replacements: Replacement[]
 }
 
 export interface Revisioned {
   revision?: number
 }
 
-export const ROW_REVISION = 2
+export const ROW_REVISION = 3
 
 export type StationRow = Station & Revisioned
 export type DeviceRow = Device & Revisioned
@@ -52,6 +54,7 @@ export type PointRow = Point & Revisioned
 export type PatrolRow = Patrol & Revisioned
 export type ReadingRow = Reading & Revisioned
 export type LeakRow = Leak & Revisioned
+export type ReplacementRow = Replacement & Revisioned
 
 class GasPressDatabase extends Dexie {
   stations!: Table<StationRow, string>
@@ -60,6 +63,7 @@ class GasPressDatabase extends Dexie {
   patrols!: Table<PatrolRow, string>
   readings!: Table<ReadingRow, string>
   leaks!: Table<LeakRow, string>
+  replacements!: Table<ReplacementRow, string>
 
   constructor() {
     super(DB_NAME)
@@ -145,6 +149,57 @@ class GasPressDatabase extends Dexie {
               if (typeof reading.deviationPct !== 'number') reading.deviationPct = 0
               if (typeof reading.isAbnormal !== 'boolean') reading.isAbnormal = false
             }
+          })
+      })
+
+    // v3：年度检修整机更换。新增 replacements 更换台账；设备/点位补退役与来源列；泄漏单补人工归档列。
+    // 升级只补缺省结构，不凭旧数据反推更换关系——缺少更换记录的旧数据一律按原设备账继续，
+    // 现有设备仍为运行、现有点位仍为当前点位，避免无中生有制造两套当前点位。
+    this.version(DB_VERSION)
+      .stores({
+        stations: 'id, name, grade, updatedAt',
+        devices: 'id, stationId, type, state, retiredAt, replacedBy, updatedAt',
+        points: 'id, deviceId, stationId, name, isCritical, retiredAt, sourcePointId, updatedAt',
+        patrols: 'id, stationId, planDate, state, updatedAt',
+        readings: 'id, patrolId, pointId, isAbnormal, updatedAt',
+        leaks: 'id, deviceId, stationId, state, archived, handler, updatedAt',
+        replacements: 'id, stationId, oldDeviceId, newDeviceId, state, pendingStep, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        for (const name of ['stations', 'devices', 'points', 'patrols', 'readings', 'leaks']) {
+          await tx
+            .table(name)
+            .toCollection()
+            .modify((row: Record<string, unknown>) => {
+              row.revision = ROW_REVISION
+            })
+        }
+
+        await tx
+          .table('devices')
+          .toCollection()
+          .modify((device: Record<string, unknown>) => {
+            if (typeof device.retiredAt !== 'string') device.retiredAt = ''
+            if (typeof device.replacedBy !== 'string') device.replacedBy = ''
+            if (typeof device.replacementId !== 'string') device.replacementId = ''
+          })
+
+        await tx
+          .table('points')
+          .toCollection()
+          .modify((point: Record<string,unknown>) => {
+            if (typeof point.retiredAt !== 'string') point.retiredAt = ''
+            if (typeof point.sourcePointId !== 'string') point.sourcePointId = ''
+            if (typeof point.sourceDeviceId !== 'string') point.sourceDeviceId = ''
+            if (typeof point.replacementId !== 'string') point.replacementId = ''
+          })
+
+        await tx
+          .table('leaks')
+          .toCollection()
+          .modify((leak: Record<string, unknown>) => {
+            if (typeof leak.archived !== 'boolean') leak.archived = false
+            if (typeof leak.archiveNote !== 'string') leak.archiveNote = ''
           })
       })
   }
@@ -244,7 +299,7 @@ function buildSeedReadings(): ReadingRow[] {
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await db.stations.bulkPut(SEED_STATIONS)
     await db.devices.bulkPut(SEED_DEVICES)
@@ -268,12 +323,13 @@ export async function initDatabase(): Promise<void> {
 export async function deleteStationCascade(stationId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     const devices = await db.devices.where('stationId').equals(stationId).toArray()
     await deleteDevicesInternal(devices.map((device) => device.id))
     if (devices.length > 0) await db.devices.bulkDelete(devices.map((device) => device.id))
     await db.patrols.where('stationId').equals(stationId).delete()
+    await db.replacements.where('stationId').equals(stationId).delete()
     await db.stations.delete(stationId)
   })
 }
@@ -281,8 +337,14 @@ export async function deleteStationCascade(stationId: string): Promise<void> {
 export async function deleteDeviceCascade(deviceId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
+    // 已完成更换的台账是历史档案，删设备也保留；仅清掉尚未完成、会指向缺失设备的在建记录。
+    await db.replacements
+      .where('newDeviceId')
+      .equals(deviceId)
+      .filter((row) => row.state !== '已完成')
+      .delete()
     await deleteDevicesInternal([deviceId])
     await db.devices.delete(deviceId)
   })
@@ -362,25 +424,27 @@ export async function recalculateReadingsOfPoint(pointId: string): Promise<void>
 /* ============================ 整库导入导出 ============================ */
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
+  const [stations, devices, points, patrols, readings, leaks, replacements] = await Promise.all([
     db.stations.count(),
     db.devices.count(),
     db.points.count(),
     db.patrols.count(),
     db.readings.count(),
-    db.leaks.count()
+    db.leaks.count(),
+    db.replacements.count()
   ])
-  return { stations, devices, points, patrols, readings, leaks }
+  return { stations, devices, points, patrols, readings, leaks, replacements }
 }
 
 export async function exportSnapshot(): Promise<BackupPayload> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
+  const [stations, devices, points, patrols, readings, leaks, replacements] = await Promise.all([
     db.stations.toArray(),
     db.devices.toArray(),
     db.points.toArray(),
     db.patrols.toArray(),
     db.readings.toArray(),
-    db.leaks.toArray()
+    db.leaks.toArray(),
+    db.replacements.toArray()
   ])
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row
@@ -395,14 +459,15 @@ export async function exportSnapshot(): Promise<BackupPayload> {
     points: points.map(strip),
     patrols: patrols.map(strip),
     readings: readings.map(strip),
-    leaks: leaks.map(strip)
+    leaks: leaks.map(strip),
+    replacements: replacements.map(strip)
   }
 }
 
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -410,7 +475,8 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.replacements.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
     await db.stations.bulkPut((payload.stations ?? []).map(rev))
@@ -419,13 +485,15 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
     await db.patrols.bulkPut((payload.patrols ?? []).map(rev))
     await db.readings.bulkPut((payload.readings ?? []).map(rev))
     await db.leaks.bulkPut((payload.leaks ?? []).map(rev))
+    // 旧备份可能不含更换台账，缺省按空账处理，不影响原有设备账
+    await db.replacements.bulkPut((payload.replacements ?? []).map(rev))
   })
 }
 
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -433,7 +501,8 @@ export async function clearAllTables(): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.replacements.clear()
     ])
   })
 }

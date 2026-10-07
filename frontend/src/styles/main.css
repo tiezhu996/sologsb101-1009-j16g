@@ -254,3 +254,53 @@ body {
   align-items: center;
   gap: 8px;
 }
+
+/* ============================ 设备整机更换 ============================ */
+.replacement-hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -4px 0 14px;
+  padding: 8px 12px;
+  background: #f7f8fa;
+  border: 1px dashed #c9cdd4;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--gp-ink-soft);
+}
+
+.replacement-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.replacement-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 12px;
+}
+
+.replacement-detail__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.replacement-detail__row .muted {
+  min-width: 64px;
+}
+
+.empty-inline {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--gp-ink-soft);
+  font-size: 13px;
+  background: #f7f8fa;
+  border-radius: 8px;
+}

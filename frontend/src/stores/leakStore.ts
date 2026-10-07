@@ -18,12 +18,21 @@ interface LeakState_ {
   stateFilter: LeakState[]
   stationId: string
   onlyOpen: boolean
+  /** 是否在列表中包含已人工归档的旧设备遗留单 */
+  includeArchived: boolean
   ready: boolean
-  patchFilter: (patch: { stateFilter?: LeakState[]; stationId?: string; onlyOpen?: boolean }) => void
+  patchFilter: (patch: {
+    stateFilter?: LeakState[]
+    stationId?: string
+    onlyOpen?: boolean
+    includeArchived?: boolean
+  }) => void
   resetFilter: () => void
   createLeak: (draft: LeakDraft) => Promise<Leak>
   updateLeak: (id: string, patch: Partial<LeakDraft>) => Promise<void>
   removeLeak: (id: string) => Promise<void>
+  archiveLeak: (id: string, note: string) => Promise<void>
+  unarchiveLeak: (id: string) => Promise<void>
   advance: (id: string, params?: { handler?: string; measure?: string }) => Promise<LeakState | null>
   submitRetest: (id: string, retestValuePpm: number, handler: string) => Promise<boolean>
   hasLeakOfDevice: (deviceId: string) => boolean
@@ -45,18 +54,20 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
   stateFilter: [],
   stationId: '',
   onlyOpen: false,
+  includeArchived: false,
   ready: false,
 
   patchFilter(patch) {
     set({
       stateFilter: patch.stateFilter ?? get().stateFilter,
       stationId: patch.stationId ?? get().stationId,
-      onlyOpen: patch.onlyOpen ?? get().onlyOpen
+      onlyOpen: patch.onlyOpen ?? get().onlyOpen,
+      includeArchived: patch.includeArchived ?? get().includeArchived
     })
   },
 
   resetFilter() {
-    set({ stateFilter: [], stationId: '', onlyOpen: false })
+    set({ stateFilter: [], stationId: '', onlyOpen: false, includeArchived: false })
   },
 
   async createLeak(draft) {
@@ -88,6 +99,28 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
 
   async removeLeak(id) {
     await db.leaks.delete(id)
+  },
+
+  /**
+   * 人工归档：整机更换后旧设备上未闭环的泄漏单留在原处（不迁到新设备），
+   * 由人工确认归档。归档后不再计入待处置口径，但记录仍挂在旧设备账上。
+   */
+  async archiveLeak(id, note) {
+    await db.leaks.update(id, {
+      archived: true,
+      archivedAt: Date.now(),
+      archiveNote: note.trim() || '设备已整机更换，旧故障随旧设备人工归档',
+      updatedAt: Date.now()
+    })
+  },
+
+  async unarchiveLeak(id) {
+    await db.leaks.update(id, {
+      archived: false,
+      archivedAt: undefined,
+      archiveNote: '',
+      updatedAt: Date.now()
+    })
   },
 
   async advance(id, params) {
@@ -131,30 +164,34 @@ export const useLeakStore = create<LeakState_>((set, get) => ({
 
   counts() {
     const counts: Record<LeakState, number> = { 待处置: 0, 已处置: 0, 已复检: 0 }
-    get().leaks.forEach((leak) => {
-      counts[leak.state] += 1
-    })
+    get()
+      .leaks.filter((leak) => leak.archived !== true)
+      .forEach((leak) => {
+        counts[leak.state] += 1
+      })
     return counts
   },
 
   closedPercent() {
-    const { leaks } = get()
-    if (leaks.length === 0) return 0
-    const closed = leaks.filter((leak) => leak.state === '已复检').length
-    return Math.round((closed / leaks.length) * 100)
+    const visible = get().leaks.filter((leak) => leak.archived !== true)
+    if (visible.length === 0) return 0
+    const closed = visible.filter((leak) => leak.state === '已复检').length
+    return Math.round((closed / visible.length) * 100)
   },
 
   retestPassCount() {
-    return get().leaks.filter((leak) => leak.state === '已复检' && retestPassed(leak.retestValuePpm)).length
+    return get()
+      .leaks.filter((leak) => leak.archived !== true && leak.state === '已复检' && retestPassed(leak.retestValuePpm)).length
   },
 
   filteredLeaks() {
-    const { leaks, stateFilter, stationId, onlyOpen } = get()
+    const { leaks, stateFilter, stationId, onlyOpen, includeArchived } = get()
     return leaks
       .filter((leak) => {
+        if (!includeArchived && leak.archived === true) return false
         if (stationId && leak.stationId !== stationId) return false
         if (stateFilter.length > 0 && !stateFilter.includes(leak.state)) return false
-        if (onlyOpen && leak.state === '已复检') return false
+        if (onlyOpen && (leak.state === '已复检' || leak.archived === true)) return false
         return true
       })
       .sort((a, b) => b.foundTime.localeCompare(a.foundTime))

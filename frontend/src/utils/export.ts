@@ -98,21 +98,24 @@ export function exportReadingCsv(
 
 /** 泄漏处置台账 CSV */
 export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Leak[]): string {
-  const header = ['调压站', '设备', '出厂编号', '浓度(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人']
+  const header = ['调压站', '设备', '出厂编号', '设备是否退役', '浓度(ppm)', '发现时间', '处置措施', '状态', '人工归档', '复检值(ppm)', '复检结论', '处置人']
   const lines: string[] = [header.map(csvCell).join(',')]
   leaks.forEach((leak) => {
     const device = devices.find((item) => item.id === leak.deviceId)
     const station = stations.find((item) => item.id === leak.stationId)
     const pass = leak.retestValuePpm > 0 && leak.retestValuePpm <= 50
+    const retired = !!device && typeof device.retiredAt === 'string' && device.retiredAt.length > 0
     lines.push(
       [
         station ? station.name : '—',
         device ? `${device.type} ${device.model}` : '—',
         device ? device.serialNo : '—',
+        retired ? '已退役（历史挂账）' : '在役',
         leak.concentrationPpm,
         leak.foundTime,
         leak.measure || '—',
         leak.state,
+        leak.archived ? `已归档：${leak.archiveNote || ''}` : '未归档',
         leak.retestValuePpm,
         leak.state === '已复检' ? (pass ? '合格' : '不合格') : '未复检',
         leak.handler || '—'
@@ -128,11 +131,14 @@ export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Lea
 
 /** 点位标准值配置 CSV */
 export function exportPointCsv(stations: Station[], devices: Device[], points: Point[]): string {
-  const header = ['调压站', '设备类型', '设备型号', '点位名', '标准下限', '标准上限', '单位', '关键点', '区间宽度']
+  const header = ['调压站', '设备类型', '设备型号', '点位名', '标准下限', '标准上限', '单位', '关键点', '区间宽度', '当前/历史', '来源']
   const lines: string[] = [header.map(csvCell).join(',')]
   points.forEach((point) => {
     const device = devices.find((item) => item.id === point.deviceId)
     const station = stations.find((item) => item.id === point.stationId)
+    const sourceDevice = point.sourceDeviceId
+      ? devices.find((item) => item.id === point.sourceDeviceId)
+      : undefined
     lines.push(
       [
         station ? station.name : '—',
@@ -143,7 +149,11 @@ export function exportPointCsv(stations: Station[], devices: Device[], points: P
         point.standardMax,
         point.unit,
         point.isCritical ? '是' : '否',
-        (point.standardMax - point.standardMin).toFixed(4)
+        (point.standardMax - point.standardMin).toFixed(4),
+        point.retiredAt ? `历史（${point.retiredAt} 退役）` : '当前',
+        point.sourcePointId
+          ? `整机更换继承自 ${sourceDevice ? `${sourceDevice.type} ${sourceDevice.model}` : '旧设备'}`
+          : '原设点位'
       ]
         .map(csvCell)
         .join(',')
