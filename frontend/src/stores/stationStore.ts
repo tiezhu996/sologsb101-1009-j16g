@@ -151,6 +151,10 @@ export const useStationStore = create<StationState>((set, get) => ({
   },
 
   async updateDevice(id, patch) {
+    const existing = await db.devices.get(id)
+    if (existing && existing.replacementId && existing.state === '停用') {
+      throw new Error('该旧设备已整机更换停机留档，不能再编辑，历史记录须保留')
+    }
     const next: Partial<DeviceRow> = { ...patch, updatedAt: Date.now() }
     if (patch.model !== undefined) next.model = patch.model.trim()
     if (patch.serialNo !== undefined) next.serialNo = patch.serialNo.trim()

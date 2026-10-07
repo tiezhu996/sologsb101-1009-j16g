@@ -49,7 +49,9 @@ export function exportReadingCsv(
   const header = [
     '调压站',
     '设备',
+    '设备状态',
     '点位',
+    '点位来源',
     '标准下限',
     '标准上限',
     '单位',
@@ -68,12 +70,17 @@ export function exportReadingCsv(
     const point = points.find((item) => item.id === reading.pointId)
     const patrol = patrols.find((item) => item.id === reading.patrolId)
     const device = point ? devices.find((item) => item.id === point.deviceId) : undefined
+    const sourceDevice = point?.sourceDeviceId
+      ? devices.find((item) => item.id === point.sourceDeviceId)
+      : undefined
     const station = patrol ? stations.find((item) => item.id === patrol.stationId) : undefined
     lines.push(
       [
         station ? station.name : '—',
         device ? `${device.type} ${device.model}` : '—',
+        device ? device.state : '—',
         point ? point.name : '—',
+        sourceDevice ? `自旧机${sourceDevice.type}${sourceDevice.model}复制` : '原装机点位',
         point ? point.standardMin : '—',
         point ? point.standardMax : '—',
         point ? point.unit : '—',
@@ -98,16 +105,18 @@ export function exportReadingCsv(
 
 /** 泄漏处置台账 CSV */
 export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Leak[]): string {
-  const header = ['调压站', '设备', '出厂编号', '浓度(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人']
+  const header = ['调压站', '设备', '设备状态', '出厂编号', '浓度(ppm)', '发现时间', '处置措施', '状态', '复检值(ppm)', '复检结论', '处置人', '归档说明']
   const lines: string[] = [header.map(csvCell).join(',')]
   leaks.forEach((leak) => {
     const device = devices.find((item) => item.id === leak.deviceId)
     const station = stations.find((item) => item.id === leak.stationId)
     const pass = leak.retestValuePpm > 0 && leak.retestValuePpm <= 50
+    const onRetired = device?.state === '停用' && device.replacementId
     lines.push(
       [
         station ? station.name : '—',
         device ? `${device.type} ${device.model}` : '—',
+        device ? device.state : '—',
         device ? device.serialNo : '—',
         leak.concentrationPpm,
         leak.foundTime,
@@ -115,7 +124,8 @@ export function exportLeakCsv(stations: Station[], devices: Device[], leaks: Lea
         leak.state,
         leak.retestValuePpm,
         leak.state === '已复检' ? (pass ? '合格' : '不合格') : '未复检',
-        leak.handler || '—'
+        leak.handler || '—',
+        onRetired ? '设备已整机更换：本单按旧设备留档，待人工归档，未迁新机' : ''
       ]
         .map(csvCell)
         .join(',')

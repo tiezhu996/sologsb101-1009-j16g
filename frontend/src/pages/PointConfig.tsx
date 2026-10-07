@@ -95,6 +95,8 @@ export default function PointConfig() {
 
   const deviceOptions = stationStore.devices
     .filter((device) => !filter.stationId || device.stationId === filter.stationId)
+    // 整机更换停机保留的旧设备不再新增点位，新点位配置到接替新设备
+    .filter((device) => !(device.state === '停用' && device.replacementId))
     .map((device) => {
       const station = stationStore.stations.find((item) => item.id === device.stationId)
       return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
@@ -179,14 +181,42 @@ export default function PointConfig() {
   }
 
   const columns: TableColumnProps<Point>[] = [
-    { title: '点位名', dataIndex: 'name', width: 140, render: (value: string) => <strong>{value}</strong> },
+    {
+      title: '点位名',
+      width: 160,
+      render: (_value, record) => (
+        <Space direction="vertical" size={2}>
+          <strong>{record.name}</strong>
+          {record.sourceDeviceId ? (
+            <Tag size="small" color="green">
+              自旧设备复制
+              {record.sourcePointId ? `（来源点位 ${record.sourcePointId}）` : ''}
+            </Tag>
+          ) : null}
+        </Space>
+      )
+    },
     {
       title: '调压站 / 设备',
-      width: 220,
+      width: 240,
       render: (_value, record) => {
         const device = stationStore.devices.find((item) => item.id === record.deviceId)
         const station = stationStore.stations.find((item) => item.id === record.stationId)
-        return `${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`
+        const sourceDevice = record.sourceDeviceId
+          ? stationStore.devices.find((item) => item.id === record.sourceDeviceId)
+          : null
+        const deviceRetired = device ? device.state === '停用' && device.replacementId : false
+        return (
+          <Space direction="vertical" size={0}>
+            <span>{`${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`}</span>
+            {sourceDevice ? (
+              <span className="muted">来源旧机：{sourceDevice.type} {sourceDevice.model}（{sourceDevice.serialNo}）</span>
+            ) : null}
+            {deviceRetired ? (
+              <Tag color="gray" size="small">旧机停机留档历史点位</Tag>
+            ) : null}
+          </Space>
+        )
       }
     },
     {

@@ -53,11 +53,11 @@ sologsb101-1009/
     ├── package.json / tsconfig.json / vite.config.ts / index.html
     ├── public/favicon.svg
     └── src/
-        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts
-        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts
+        ├── types/              # station.ts device.ts point.ts patrol.ts reading.ts leak.ts replacement.ts
+        ├── stores/             # stationStore.ts patrolStore.ts leakStore.ts replacementStore.ts
         ├── components/common/  # AbnormalTag.tsx FilterBar.tsx StatBadge.tsx EmptyPanel.tsx
         ├── hooks/              # usePatrolGap.ts useIdbTable.ts
-        ├── pages/              # StationList.tsx PointConfig.tsx PatrolEntry.tsx AbnormalBoard.tsx LeakBoard.tsx PlanList.tsx
+        ├── pages/              # StationList.tsx PointConfig.tsx PatrolEntry.tsx AbnormalBoard.tsx LeakBoard.tsx ReplacementBoard.tsx PlanList.tsx
         ├── router/index.tsx
         ├── utils/              # range.ts db.ts export.ts
         ├── styles/main.css
@@ -74,13 +74,29 @@ sologsb101-1009/
 | `/patrols` | 巡检录入 | Patrol、Reading、Point | 选定任务后逐点录入读数，实时偏差率与异常级别；逐点或整批保存；完成巡检、标记漏检、现场备注 |
 | `/abnormal` | 异常判定与分级 | Reading、Point | 按关键点权重降序排列；勾选批量确认；浓度类点位一键派发泄漏处置单 |
 | `/leaks` | 泄漏处置单与复检闭环 | Leak、Device、Reading | 派单 → 填写处置措施与处置人 → 录入复检浓度判合格闭环；导出处置台账 CSV |
+| `/replacements` | 年度检修设备更换台账 | DeviceReplacement、Device、Point、Leak | 登记旧/新设备与停机/投运时间；停机切换分步断点推进（旧机保留历史、当前点位复制到新机并标明来源、泄漏单留旧机待人工归档），中断后接着上次进度 |
 | `/plans` | 巡检计划与漏检提醒 | Patrol、Station | 按站点批量生成计划；超期未检自动提醒并按超期天数排序；导出读数台账 CSV 与结构版本 |
 
 ## 五、数据存储说明
 
 - **IndexedDB 库名**：`gbgaspress`（Dexie 封装，`src/utils/db.ts`）
-- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`
-- **数据结构版本**：`DB_VERSION = 2`，含 `version(1)` → `version(2)` 的索引变更与 `upgrade()` 迁移（补齐 `revision`、用所属设备回填点位与处置单的 `stationId` 冗余列、按标准区间重算历史读数 `deviationPct` / `isAbnormal`）
+- **对象表**：`stations`、`devices`、`points`、`patrols`、`readings`、`leaks`、`replacements`
+- **数据结构版本**：`DB_VERSION = 3`。v1→v2 补 `revision`、回填点位/处置单 `stationId` 冗余列并重算历史读数；v2→v3 新增设备更换台账表，为 `devices` 补 `shutdownDate`/`replacementId`/`replacedFromDeviceId`、为 `points` 补 `sourcePointId`/`sourceDeviceId`/`replacementId`。**缺少更换记录的旧数据按原设备账继续，不臆造更换、不复制点位，升级后绝不出现两套当前点位**
+
+### 设备整机更换口径（年度检修）
+
+整机更换**不直接改编号、不删旧设备**，统一走 `/replacements`：
+
+1. **登记**：记录旧设备、新设备（型号/出厂编号）、计划停机与投运时间；登记后旧设备仍在役，读数/点位/泄漏单不动。
+2. **停机切换**（按 `建新机 → 旧机停机 → 复制点位` 三步分步事务推进，每步在更换单落断点）：
+   - 新设备建账（投运前为「检修」态，记录接替来源 `replacedFromDeviceId`）；
+   - 旧设备置「停用」并写实际停机时间，**历史点位与读数原样保留**，不删除；
+   - 旧设备当前点位配置**复制**到新设备，新点位写 `sourcePointId`/`sourceDeviceId`/`replacementId` 标明来源（读数不复制）。
+3. **泄漏处置单不迁移**：未闭环的泄漏单继续挂旧设备，在泄漏处置页标注「待人工归档」，避免新机无端背上旧故障。
+4. **投运确认**：新设备转「运行」并回写实际投运时间，更换单闭环。
+
+任意一步写入失败或中途刷新，再次执行停机切换会按 `completedSteps` **接着上次进度**幂等续跑，已完成步骤跳过；步骤顺序保证任意断点都不会留下两套当前点位。纳入更换台账的旧机/新机禁止直接删除或改编号。
+
 - **首屏自动播种**：`initDatabase()` 中 `if (await db.stations.count() === 0) await seedDatabase()`，播种 2 座调压站 → 5 台设备 → 11 个点位 → 6 次巡检 → 11 条读数 → 3 张泄漏处置单的完整父子孙链条；播种幂等
 - **localStorage 辅助键**：`gbgaspress:db-version`、`gbgaspress:last-backup-at`、`gbgaspress:ui-prefs`
 - 应用为**无状态容器**：数据不落容器磁盘、不使用数据库服务、不挂载命名卷

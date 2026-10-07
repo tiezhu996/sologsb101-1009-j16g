@@ -7,6 +7,7 @@ import { ROUTES } from './router'
 import { useStationStore } from './stores/stationStore'
 import { usePatrolStore } from './stores/patrolStore'
 import { useLeakStore } from './stores/leakStore'
+import { useReplacementStore } from './stores/replacementStore'
 import { usePatrolGap } from './hooks/usePatrolGap'
 
 export default function App() {
@@ -15,9 +16,12 @@ export default function App() {
   const stationStore = useStationStore()
   const patrolStore = usePatrolStore()
   const leakStore = useLeakStore()
+  const replacementStore = useReplacementStore()
   const gap = usePatrolGap(patrolStore.patrols)
 
   const currentStation = stationStore.currentStation()
+
+  const pendingReplacementCount = replacementStore.replacements.filter((item) => item.state !== '已投运').length
 
   const navItems = [
     { path: ROUTES.stations, label: '调压站台账', count: stationStore.stations.length },
@@ -25,6 +29,7 @@ export default function App() {
     { path: ROUTES.patrols, label: '巡检录入', count: patrolStore.patrols.length },
     { path: ROUTES.abnormal, label: '异常分级', count: patrolStore.abnormalRows().length },
     { path: ROUTES.leaks, label: '泄漏处置', count: leakStore.counts()['待处置'] },
+    { path: ROUTES.replacements, label: '设备更换', count: pendingReplacementCount },
     { path: ROUTES.plans, label: '巡检计划', count: gap.overdueCount }
   ]
 

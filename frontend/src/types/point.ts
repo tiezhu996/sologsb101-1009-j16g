@@ -11,6 +11,14 @@ export interface Point {
   unit: string
   /** 是否关键点：关键点偏差超过 5% 即判严重超标 */
   isCritical: boolean
+  /**
+   * 设备更换复制来源：原装机点位为空；整机更换时从旧设备复制来的当前点位
+   * 记录来源点位与来源设备 id，标明「自旧设备复制」。
+   */
+  sourcePointId?: string
+  sourceDeviceId?: string
+  /** 来源更换单 id（追溯到具体的年度检修更换记录） */
+  replacementId?: string
   createdAt: number
   updatedAt: number
 }

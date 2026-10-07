@@ -68,13 +68,14 @@ export default function PatrolEntry() {
     ? patrolStore.patrols.find((patrol) => patrol.id === patrolStore.activePatrolId) ?? null
     : null
 
-  /** 当前站点下所有设备点位 */
+  /** 当前站点下在役设备点位（整机更换停机保留的旧设备不再承担当前巡检，其点位为历史点位） */
   const activePoints = useMemo<Point[]>(() => {
     if (!activePatrol) return []
-    const deviceIds = stationStore.devices
+    const activeDeviceIds = stationStore.devices
       .filter((device) => device.stationId === activePatrol.stationId)
+      .filter((device) => !(device.state === '停用' && device.replacementId))
       .map((device) => device.id)
-    return stationStore.points.filter((point) => deviceIds.includes(point.deviceId))
+    return stationStore.points.filter((point) => activeDeviceIds.includes(point.deviceId))
   }, [activePatrol, stationStore.devices, stationStore.points])
 
   const activeReadings = activePatrol ? patrolStore.readingsOfPatrol(activePatrol.id) : []

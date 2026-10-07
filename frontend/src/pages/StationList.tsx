@@ -16,7 +16,8 @@ import {
   Select,
   Space,
   Table,
-  Tag
+  Tag,
+  Tooltip
 } from '@arco-design/web-react'
 import type { TableColumnProps } from '@arco-design/web-react'
 import EmptyPanel from '@/components/common/EmptyPanel'
@@ -25,10 +26,13 @@ import StatBadge from '@/components/common/StatBadge'
 import { useStationStore } from '@/stores/stationStore'
 import { usePatrolStore } from '@/stores/patrolStore'
 import { useLeakStore } from '@/stores/leakStore'
+import { useReplacementStore } from '@/stores/replacementStore'
 import {
   DEVICE_STATES,
   DEVICE_TYPES,
   EMPTY_DEVICE_DRAFT,
+  isReplacementDevice,
+  isRetiredDevice,
   type Device,
   type DeviceDraft,
   type DeviceState,
@@ -49,6 +53,7 @@ export default function StationList() {
   const stationStore = useStationStore()
   const patrolStore = usePatrolStore()
   const leakStore = useLeakStore()
+  const replacementStore = useReplacementStore()
 
   const [stationForm] = Form.useForm<StationDraft>()
   const [deviceForm] = Form.useForm<DeviceDraft>()
@@ -160,15 +165,50 @@ export default function StationList() {
   }
 
   const removeDevice = async (device: Device): Promise<void> => {
-    await stationStore.removeDevice(device.id)
-    Message.success('设备及其点位、处置单已删除')
+    if (device.replacementId || device.replacedFromDeviceId) {
+      Message.warning('该设备已纳入整机更换台账，不能删除，请在设备更换页查看/处理')
+      return
+    }
+    try {
+      await stationStore.removeDevice(device.id)
+      Message.success('设备及其点位、处置单已删除')
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '删除失败')
+    }
   }
 
   const deviceColumns: TableColumnProps<Device>[] = [
-    { title: '设备类型', dataIndex: 'type', width: 110, render: (value: DeviceType) => <Tag color="arcoblue">{value}</Tag> },
+    {
+      title: '设备类型',
+      width: 110,
+      render: (_value, record) => (
+        <Space size={4}>
+          <Tag color="arcoblue">{record.type}</Tag>
+          {isRetiredDevice(record) ? (
+            <Tooltip content="年度检修整机更换后停机保留，历史读数/点位/泄漏单仍挂本机">
+              <Tag color="gray" size="small">旧机留档</Tag>
+            </Tooltip>
+          ) : null}
+          {isReplacementDevice(record) ? (
+            <Tooltip content={`整机更换后的接替新设备，来源设备 ${record.replacedFromDeviceId}`}>
+              <Tag color="green" size="small">接替新机</Tag>
+            </Tooltip>
+          ) : null}
+        </Space>
+      )
+    },
     { title: '型号', dataIndex: 'model', width: 150 },
     { title: '出厂编号', dataIndex: 'serialNo', width: 170 },
-    { title: '投用日期', dataIndex: 'installDate', width: 120 },
+    {
+      title: '投用 / 停机',
+      width: 180,
+      render: (_value, record) => (
+        <Space direction="vertical" size={0}>
+          <span>投用 {record.installDate || '—'}</span>
+          {record.shutdownDate ? <span className="muted">停机 {record.shutdownDate}</span> : null}
+        </Space>
+      )
+    },
     {
       title: '状态',
       dataIndex: 'state',
@@ -184,29 +224,62 @@ export default function StationList() {
     },
     {
       title: '操作',
-      width: 230,
-      render: (_value, record) => (
-        <Space size={4}>
-          <Button type="text" size="small" onClick={() => openEditDevice(record)}>
-            编辑
-          </Button>
-          <Popconfirm title="删除该设备将级联删除其点位与泄漏处置单" onOk={() => removeDevice(record)}>
-            <Button type="text" size="small" status="danger">
-              删除
+      width: 300,
+      render: (_value, record) => {
+        const retired = isRetiredDevice(record)
+        const replaced = isReplacementDevice(record)
+        return (
+          <Space size={4} wrap>
+            <Button
+              type="text"
+              size="small"
+              disabled={retired}
+              onClick={() => (retired ? Message.info('旧机已停机留档，不再编辑') : openEditDevice(record))}
+            >
+              编辑
             </Button>
-          </Popconfirm>
-          <Button
-            type="text"
-            size="small"
-            onClick={() => {
-              stationStore.patchPointFilter({ stationId: record.stationId, keyword: '' })
-              navigate('/points')
-            }}
-          >
-            点位配置
-          </Button>
-        </Space>
-      )
+            {retired || replaced ? (
+              <Tooltip content="整机更换台账中的设备不能直接删除，避免历史读数/泄漏单错挂">
+                <Button type="text" size="small" status="danger" disabled>
+                  删除
+                </Button>
+              </Tooltip>
+            ) : (
+              <Popconfirm title="删除该设备将级联删除其点位与泄漏处置单；整机更换请走「设备更换」" onOk={() => removeDevice(record)}>
+                <Button type="text" size="small" status="danger">
+                  删除
+                </Button>
+              </Popconfirm>
+            )}
+            <Button
+              type="text"
+              size="small"
+              disabled={retired || replaced}
+              onClick={() => {
+                if (retired || replaced) return
+                navigate('/replacements')
+              }}
+            >
+              {retired || replaced ? '已纳入更换' : '整机更换'}
+            </Button>
+            {retired || replaced ? (
+              <Button type="text" size="small" onClick={() => navigate('/replacements')}>
+                更换台账
+              </Button>
+            ) : null}
+            <Button
+              type="text"
+              size="small"
+              onClick={() => {
+                stationStore.patchPointFilter({ stationId: record.stationId, keyword: '' })
+                navigate('/points')
+              }}
+            >
+              点位配置
+            </Button>
+          </Space>
+        )
+      }
     }
   ]
 
@@ -218,6 +291,7 @@ export default function StationList() {
           <p className="page-head__desc">先建站点再登记设备；卡片回显设备数、待处置泄漏数与漏检次数。</p>
         </div>
         <div className="page-head__actions">
+          <Button onClick={() => navigate('/replacements')}>设备更换台账</Button>
           <Button type="primary" onClick={openCreateStation}>
             新建调压站
           </Button>
@@ -309,7 +383,25 @@ export default function StationList() {
               compact
             />
           ) : (
-            <Table<Device> rowKey="id" size="small" border data={devices} columns={deviceColumns} pagination={false} />
+            <>
+              {currentStation &&
+              replacementStore.replacements.some(
+                (item) =>
+                  item.stationId === currentStation.id &&
+                  item.state === '已登记' &&
+                  item.completedSteps.length > 0
+              ) ? (
+                <div style={{ marginBottom: 10 }}>
+                  <Tag color="orange" size="small">
+                    存在中断的停机切换，请到「设备更换台账」续跑，避免新旧设备点位不一致
+                  </Tag>
+                  <Button type="text" size="small" onClick={() => navigate('/replacements')}>
+                    前往续跑
+                  </Button>
+                </div>
+              ) : null}
+              <Table<Device> rowKey="id" size="small" border data={devices} columns={deviceColumns} pagination={false} />
+            </>
           )}
         </div>
       </div>

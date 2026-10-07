@@ -33,6 +33,7 @@ import {
   type LeakDraft,
   type LeakState
 } from '@/types/leak'
+import { isRetiredDevice } from '@/types/device'
 import { deviationPctOf, formatLeakConcentration } from '@/utils/range'
 
 export default function LeakBoard() {
@@ -87,10 +88,13 @@ export default function LeakBoard() {
     )
   })
 
-  const deviceOptions = stationStore.devices.map((device) => {
-    const station = stationStore.stations.find((item) => item.id === device.stationId)
-    return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
-  })
+  const deviceOptions = stationStore.devices
+    // 整机更换停机保留的旧设备不再承接新泄漏单，新故障应登记到接替新设备
+    .filter((device) => !(device.state === '停用' && device.replacementId))
+    .map((device) => {
+      const station = stationStore.stations.find((item) => item.id === device.stationId)
+      return { label: `${station ? station.name : '未知站'} · ${device.type} ${device.model}`, value: device.id }
+    })
 
   const openCreate = (): void => {
     if (deviceOptions.length === 0) {
@@ -176,11 +180,21 @@ export default function LeakBoard() {
   const columns: TableColumnProps<Leak>[] = [
     {
       title: '调压站 / 设备',
-      width: 240,
+      width: 260,
       render: (_value, record) => {
         const station = stationStore.stations.find((item) => item.id === record.stationId)
         const device = stationStore.devices.find((item) => item.id === record.deviceId)
-        return `${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`
+        const retired = device ? isRetiredDevice(device) : false
+        return (
+          <Space direction="vertical" size={2}>
+            <span>{`${station ? station.name : '—'} / ${device ? `${device.type} ${device.model}` : '—'}`}</span>
+            {retired ? (
+              <Tag color="gray" size="small">
+                设备已整机更换停机，本单按旧设备留档待人工归档（不迁新机）
+              </Tag>
+            ) : null}
+          </Space>
+        )
       }
     },
     {

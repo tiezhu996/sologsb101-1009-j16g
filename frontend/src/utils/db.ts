@@ -10,10 +10,11 @@ import type { Point } from '@/types/point'
 import type { Patrol } from '@/types/patrol'
 import type { Reading } from '@/types/reading'
 import type { Leak } from '@/types/leak'
+import type { DeviceReplacement, ReplacementStep } from '@/types/replacement'
 import { deviationPctOf, judgeReading } from '@/utils/range'
 
 export const DB_NAME = 'gbgaspress'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 export const LS_KEYS = {
   dbVersion: 'gbgaspress:db-version',
@@ -38,6 +39,7 @@ export interface BackupPayload {
   patrols: Patrol[]
   readings: Reading[]
   leaks: Leak[]
+  replacements: DeviceReplacement[]
 }
 
 export interface Revisioned {
@@ -52,6 +54,7 @@ export type PointRow = Point & Revisioned
 export type PatrolRow = Patrol & Revisioned
 export type ReadingRow = Reading & Revisioned
 export type LeakRow = Leak & Revisioned
+export type ReplacementRow = DeviceReplacement & Revisioned
 
 class GasPressDatabase extends Dexie {
   stations!: Table<StationRow, string>
@@ -60,6 +63,7 @@ class GasPressDatabase extends Dexie {
   patrols!: Table<PatrolRow, string>
   readings!: Table<ReadingRow, string>
   leaks!: Table<LeakRow, string>
+  replacements!: Table<ReplacementRow, string>
 
   constructor() {
     super(DB_NAME)
@@ -145,6 +149,40 @@ class GasPressDatabase extends Dexie {
               if (typeof reading.deviationPct !== 'number') reading.deviationPct = 0
               if (typeof reading.isAbnormal !== 'boolean') reading.isAbnormal = false
             }
+          })
+      })
+
+    // v3：设备整机更换台账（replacements 表）
+    // - 旧设备不删不删改编号：补停机/更换单/来源列，历史读数与点位全部保留在旧设备名下
+    // - 点位补复制来源列；旧数据缺少更换记录时按原设备账继续，不臆造更换、不拆点位
+    this.version(DB_VERSION)
+      .stores({
+        stations: 'id, name, grade, updatedAt',
+        devices: 'id, stationId, type, state, replacedFromDeviceId, replacementId, updatedAt',
+        points: 'id, deviceId, stationId, name, isCritical, sourceDeviceId, replacementId, updatedAt',
+        patrols: 'id, stationId, planDate, state, updatedAt',
+        readings: 'id, patrolId, pointId, isAbnormal, updatedAt',
+        leaks: 'id, deviceId, stationId, state, handler, updatedAt',
+        replacements: 'id, stationId, oldDeviceId, newDeviceId, state, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 历史设备/点位缺更换列时按原设备账继续：只补列、不生成更换记录、不复制点位，
+        // 保证升级后不存在两套当前点位。
+        await tx
+          .table('devices')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            if (typeof row.shutdownDate !== 'string') row.shutdownDate = ''
+            if (typeof row.replacementId !== 'string') row.replacementId = ''
+            if (typeof row.replacedFromDeviceId !== 'string') row.replacedFromDeviceId = ''
+          })
+        await tx
+          .table('points')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            if (typeof row.sourcePointId !== 'string') row.sourcePointId = ''
+            if (typeof row.sourceDeviceId !== 'string') row.sourceDeviceId = ''
+            if (typeof row.replacementId !== 'string') row.replacementId = ''
           })
       })
   }
@@ -244,7 +282,7 @@ function buildSeedReadings(): ReadingRow[] {
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await db.stations.bulkPut(SEED_STATIONS)
     await db.devices.bulkPut(SEED_DEVICES)
@@ -252,6 +290,8 @@ export async function seedDatabase(): Promise<void> {
     await db.patrols.bulkPut(SEED_PATROLS)
     await db.readings.bulkPut(buildSeedReadings())
     await db.leaks.bulkPut(SEED_LEAKS)
+    // 演示数据保持原设备账（不预置更换记录）：缺少更换记录即按原设备继续，不拆当前点位
+    await db.replacements.clear()
   })
 }
 
@@ -265,15 +305,27 @@ export async function initDatabase(): Promise<void> {
 
 /* ============================== 级联删除 ============================== */
 
+/** 已纳入整机更换台账的设备（旧机/新机）不允许直接删除，历史账必须保留 */
+async function assertDeletableDevices(deviceIds: string[]): Promise<void> {
+  if (deviceIds.length === 0) return
+  const rows = await db.devices.where('id').anyOf(deviceIds).toArray()
+  const locked = rows.find((device) => device.replacementId || device.replacedFromDeviceId)
+  if (locked) {
+    throw new Error(`设备「${locked.type} ${locked.model}」已纳入整机更换台账，不能直接删除，历史读数与泄漏单须随更换记录保留`)
+  }
+}
+
 export async function deleteStationCascade(stationId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     const devices = await db.devices.where('stationId').equals(stationId).toArray()
+    await assertDeletableDevices(devices.map((device) => device.id))
     await deleteDevicesInternal(devices.map((device) => device.id))
     if (devices.length > 0) await db.devices.bulkDelete(devices.map((device) => device.id))
     await db.patrols.where('stationId').equals(stationId).delete()
+    await db.replacements.where('stationId').equals(stationId).delete()
     await db.stations.delete(stationId)
   })
 }
@@ -281,8 +333,9 @@ export async function deleteStationCascade(stationId: string): Promise<void> {
 export async function deleteDeviceCascade(deviceId: string): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
+    await assertDeletableDevices([deviceId])
     await deleteDevicesInternal([deviceId])
     await db.devices.delete(deviceId)
   })
@@ -362,25 +415,27 @@ export async function recalculateReadingsOfPoint(pointId: string): Promise<void>
 /* ============================ 整库导入导出 ============================ */
 
 export async function countAll(): Promise<Record<string, number>> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
+  const [stations, devices, points, patrols, readings, leaks, replacements] = await Promise.all([
     db.stations.count(),
     db.devices.count(),
     db.points.count(),
     db.patrols.count(),
     db.readings.count(),
-    db.leaks.count()
+    db.leaks.count(),
+    db.replacements.count()
   ])
-  return { stations, devices, points, patrols, readings, leaks }
+  return { stations, devices, points, patrols, readings, leaks, replacements }
 }
 
 export async function exportSnapshot(): Promise<BackupPayload> {
-  const [stations, devices, points, patrols, readings, leaks] = await Promise.all([
+  const [stations, devices, points, patrols, readings, leaks, replacements] = await Promise.all([
     db.stations.toArray(),
     db.devices.toArray(),
     db.points.toArray(),
     db.patrols.toArray(),
     db.readings.toArray(),
-    db.leaks.toArray()
+    db.leaks.toArray(),
+    db.replacements.toArray()
   ])
   const strip = <T extends Revisioned>(row: T): Omit<T, 'revision'> => {
     const { revision: _revision, ...rest } = row
@@ -395,14 +450,15 @@ export async function exportSnapshot(): Promise<BackupPayload> {
     points: points.map(strip),
     patrols: patrols.map(strip),
     readings: readings.map(strip),
-    leaks: leaks.map(strip)
+    leaks: leaks.map(strip),
+    replacements: replacements.map(strip)
   }
 }
 
 export async function importSnapshot(payload: BackupPayload): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -410,7 +466,8 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.replacements.clear()
     ])
     const rev = <T>(row: T): T & Revisioned => ({ ...row, revision: ROW_REVISION })
     await db.stations.bulkPut((payload.stations ?? []).map(rev))
@@ -419,13 +476,14 @@ export async function importSnapshot(payload: BackupPayload): Promise<void> {
     await db.patrols.bulkPut((payload.patrols ?? []).map(rev))
     await db.readings.bulkPut((payload.readings ?? []).map(rev))
     await db.leaks.bulkPut((payload.leaks ?? []).map(rev))
+    await db.replacements.bulkPut((payload.replacements ?? []).map(rev))
   })
 }
 
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
       'rw',
-      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks],
+      [db.stations, db.devices, db.points, db.patrols, db.readings, db.leaks, db.replacements],
       async () => {
     await Promise.all([
       db.stations.clear(),
@@ -433,7 +491,8 @@ export async function clearAllTables(): Promise<void> {
       db.points.clear(),
       db.patrols.clear(),
       db.readings.clear(),
-      db.leaks.clear()
+      db.leaks.clear(),
+      db.replacements.clear()
     ])
   })
 }
@@ -441,6 +500,221 @@ export async function clearAllTables(): Promise<void> {
 export async function resetDatabase(): Promise<void> {
   await clearAllTables()
   await seedDatabase()
+}
+
+/* ============================ 设备更换（年度检修整机更换） ============================ */
+
+export interface RegisterReplacementInput {
+  stationId: string
+  oldDeviceId: string
+  newType: Device['type']
+  newModel: string
+  newSerialNo: string
+  shutdownPlanDate: string
+  commissionPlanDate: string
+  remark: string
+}
+
+/**
+ * 登记更换单（停机前）：只落更换记录，旧设备仍在役、读数/点位/泄漏单一律不动。
+ * 不允许对已停机保留的旧设备重复登记。
+ */
+export async function registerReplacement(input: RegisterReplacementInput): Promise<ReplacementRow> {
+  const old = await db.devices.get(input.oldDeviceId)
+  if (!old) throw new Error('旧设备不存在，无法登记更换')
+  if (old.state === '停用' && old.replacementId) {
+    throw new Error('该设备已停机保留，不能重复登记更换')
+  }
+  const now = Date.now()
+  const row: ReplacementRow = {
+    id: createId('rp'),
+    stationId: input.stationId || old.stationId,
+    oldDeviceId: input.oldDeviceId,
+    newDeviceId: '',
+    newType: input.newType,
+    newModel: input.newModel.trim(),
+    newSerialNo: input.newSerialNo.trim(),
+    shutdownPlanDate: input.shutdownPlanDate,
+    shutdownDate: '',
+    commissionPlanDate: input.commissionPlanDate,
+    commissionDate: '',
+    state: '已登记',
+    completedSteps: [],
+    copiedPointMap: [],
+    remark: input.remark.trim(),
+    createdAt: now,
+    updatedAt: now,
+    revision: ROW_REVISION
+  }
+  await db.replacements.put(row)
+  return row
+}
+
+/**
+ * 停机切换：按步骤断点推进，每个步骤独立事务并在更换单上落点，写入失败/刷新后重进接着跑。
+ * 步骤顺序刻意安排为「建新机 → 旧机停机 → 复制点位」，保证任意一个断点都不会留下两套当前点位：
+ *  1. create-device：登记新设备（检修态、暂不带点位）
+ *  2. retire-device：旧设备置「停用」并写停机时间（此时只有旧机的历史点位，且旧机已不承担当前巡检）
+ *  3. copy-points：旧设备当前点位复制到新设备并标明来源；历史读数不复制、泄漏单不迁移
+ * 泄漏处置单按旧设备留在原处等待人工归档，迁到新设备会让新机无端背上旧故障。
+ * 旧数据缺少更换记录时不进入本流程，按原设备账继续。
+ */
+export async function executeShutdownCutover(replacementId: string, shutdownDate: string): Promise<ReplacementRow> {
+  const existing = await db.replacements.get(replacementId)
+  if (!existing) throw new Error('更换记录不存在')
+  if (existing.state === '已投运') throw new Error('更换已投运，无需再停机切换')
+  let rep: ReplacementRow = existing
+
+  /** 单步事务：动作与步骤落点同提交，成功后该步永久跳过，天然幂等 */
+  const runStep = async (step: ReplacementStep, tables: Table[], action: (row: ReplacementRow) => Promise<void>): Promise<void> => {
+    if (rep.completedSteps.includes(step)) return
+    await db.transaction('rw', tables, async () => {
+      const current = await db.replacements.get(replacementId)
+      if (!current) throw new Error('更换记录不存在')
+      if (current.completedSteps.includes(step)) {
+        rep = current
+        return
+      }
+      await action(current)
+      const next: ReplacementRow = {
+        ...current,
+        completedSteps: [...current.completedSteps, step],
+        updatedAt: Date.now()
+      }
+      await db.replacements.put(next)
+      rep = next
+    })
+  }
+
+  await runStep('create-device', [db.replacements, db.devices], async (current) => {
+    const old = await db.devices.get(current.oldDeviceId)
+    if (!old) throw new Error('旧设备不存在')
+    if (current.newDeviceId && (await db.devices.get(current.newDeviceId))) return
+    const now = Date.now()
+    const newRow: DeviceRow = {
+      id: createId('dv'),
+      stationId: current.stationId,
+      // 登记信息随更换单持久化，刷新/中断后仍可据此建账
+      type: current.newType as DeviceRow['type'],
+      model: current.newModel,
+      serialNo: current.newSerialNo,
+      // 投运日期在确认投运时回写，停机阶段先留空
+      installDate: '',
+      state: '检修',
+      shutdownDate: '',
+      replacementId: current.id,
+      replacedFromDeviceId: old.id,
+      createdAt: now,
+      updatedAt: now,
+      revision: ROW_REVISION
+    }
+    await db.devices.put(newRow)
+    current.newDeviceId = newRow.id
+  })
+
+  await runStep('retire-device', [db.replacements, db.devices], async (current) => {
+    const old = await db.devices.get(current.oldDeviceId)
+    if (!old) throw new Error('旧设备不存在')
+    // 旧设备保留历史：只置停用、记停机时间与更换单；不删点位/读数/泄漏单
+    await db.devices.update(old.id, {
+      state: '停用',
+      shutdownDate: shutdownDate || current.shutdownPlanDate,
+      replacementId: current.id,
+      updatedAt: Date.now()
+    })
+  })
+
+  await runStep('copy-points', [db.replacements, db.devices, db.points], async (current) => {
+    const newDevice = await db.devices.get(current.newDeviceId)
+    if (!newDevice) throw new Error('新设备尚未登记')
+    // 旧设备名下的点位即历史点位，复制其配置作为新设备的当前点位；读数留在旧设备不复制
+    const oldPoints = await db.points.where('deviceId').equals(current.oldDeviceId).toArray()
+    const now = Date.now()
+    const copiedMap = [...current.copiedPointMap]
+    for (const oldPoint of oldPoints) {
+      // 幂等：映射已存在且新点位仍在则跳过，避免重复/两套点位
+      const mapped = copiedMap.find((item) => item.oldPointId === oldPoint.id)
+      if (mapped && (await db.points.get(mapped.newPointId))) continue
+      const copy: PointRow = {
+        id: createId('pt'),
+        deviceId: newDevice.id,
+        stationId: current.stationId,
+        name: oldPoint.name,
+        standardMin: oldPoint.standardMin,
+        standardMax: oldPoint.standardMax,
+        unit: oldPoint.unit,
+        isCritical: oldPoint.isCritical,
+        sourcePointId: oldPoint.id,
+        sourceDeviceId: current.oldDeviceId,
+        replacementId: current.id,
+        createdAt: now,
+        updatedAt: now,
+        revision: ROW_REVISION
+      }
+      await db.points.put(copy)
+      const index = copiedMap.findIndex((item) => item.oldPointId === oldPoint.id)
+      if (index >= 0) copiedMap[index] = { oldPointId: oldPoint.id, newPointId: copy.id }
+      else copiedMap.push({ oldPointId: oldPoint.id, newPointId: copy.id })
+    }
+    current.copiedPointMap = copiedMap
+  })
+
+  // 全部步骤落点后置「已停机」（独立事务，作为切换完成标记）
+  if (rep.state !== '已停机') {
+    await db.transaction('rw', [db.replacements], async () => {
+      const current = await db.replacements.get(replacementId)
+      if (!current || current.state === '已停机') return
+      const next: ReplacementRow = {
+        ...current,
+        state: '已停机',
+        shutdownDate: shutdownDate || current.shutdownPlanDate,
+        updatedAt: Date.now()
+      }
+      await db.replacements.put(next)
+      rep = next
+    })
+  }
+  return rep
+}
+
+/**
+ * 投运确认：新设备转「运行」并回写投运日期，更换单闭环。
+ * 历史读数与未归档泄漏单继续留在旧设备名下。
+ */
+export async function confirmCommissioned(replacementId: string, commissionDate: string): Promise<ReplacementRow> {
+  return db.transaction('rw', [db.replacements, db.devices], async () => {
+    const rep = await db.replacements.get(replacementId)
+    if (!rep) throw new Error('更换记录不存在')
+    if (rep.state === '已登记') throw new Error('尚未完成停机切换，不能投运')
+    const newDevice = await db.devices.get(rep.newDeviceId)
+    if (!newDevice) throw new Error('新设备不存在')
+    const date = commissionDate || rep.commissionPlanDate
+    await db.devices.update(newDevice.id, {
+      state: '运行',
+      installDate: date,
+      updatedAt: Date.now()
+    })
+    const next: ReplacementRow = {
+      ...rep,
+      state: '已投运',
+      commissionDate: date,
+      updatedAt: Date.now()
+    }
+    await db.replacements.put(next)
+    return next
+  })
+}
+
+export async function deleteReplacement(replacementId: string): Promise<void> {
+  await db.transaction('rw', [db.replacements, db.devices, db.points], async () => {
+    const rep = await db.replacements.get(replacementId)
+    if (!rep) return
+    // 仅允许删除未开始切换的登记单；已切换则只允许继续走完，避免新旧设备账悬空
+    if (rep.completedSteps.length > 0) {
+      throw new Error('停机切换已开始，不能删除，请接着完成切换')
+    }
+    await db.replacements.delete(replacementId)
+  })
 }
 
 /* ============================ 本地 UI 偏好 ============================ */
